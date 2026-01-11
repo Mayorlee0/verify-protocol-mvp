@@ -1,0 +1,176 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum ManufacturerStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum BatchStatus {
+  CREATED
+  ACTIVE
+  PAUSED
+  CLOSED
+}
+
+enum CodePackStatus {
+  GENERATING
+  READY
+  DOWNLOADED
+  PRINT_CONFIRMED
+}
+
+enum VerifyIntentStatus {
+  ISSUED
+  CONFIRMED
+  EXPIRED
+  FAILED
+}
+
+enum VerificationResult {
+  SUCCESS
+  FAIL
+}
+
+enum TreasuryOpType {
+  REFILL_SWAP
+}
+
+model Manufacturer {
+  id           String             @id @default(uuid())
+  name         String
+  status       ManufacturerStatus @default(ACTIVE)
+  hmacKmsKeyId String
+  createdAt    DateTime           @default(now())
+
+  skus    Sku[]
+  batches Batch[]
+}
+
+model Sku {
+  id             String       @id @default(uuid())
+  manufacturerId String
+  skuCode        String
+  skuName        String
+  skuHash        Bytes
+  createdAt      DateTime     @default(now())
+
+  manufacturer Manufacturer @relation(fields: [manufacturerId], references: [id])
+  batches      Batch[]
+}
+
+model Batch {
+  id                 String       @id @default(uuid())
+  manufacturerId     String
+  skuId              String
+  batchPublicId      String       @unique
+  batchLabel         String
+  expiryDate         DateTime?
+  rewardUsdTarget    Decimal      @default(0.10)
+  onchainBatchPubkey String?
+  status             BatchStatus  @default(CREATED)
+  activatedAt        DateTime?
+  activatedTxSignature String?
+  createdAt          DateTime     @default(now())
+
+  manufacturer Manufacturer @relation(fields: [manufacturerId], references: [id])
+  sku          Sku          @relation(fields: [skuId], references: [id])
+  codePacks    CodePack[]
+  verifyIntents VerifyIntent[]
+  verifications Verification[]
+}
+
+model CodePack {
+  id                String        @id @default(uuid())
+  packId            String        @unique
+  batchId           String
+  quantity          Int
+  status            CodePackStatus @default(GENERATING)
+  downloadCount     Int           @default(0)
+  downloadExpiresAt DateTime?
+  downloadedAt      DateTime?
+  printConfirmedAt  DateTime?
+  plaintextPurgedAt DateTime?
+  createdAt         DateTime      @default(now())
+
+  batch Batch @relation(fields: [batchId], references: [id])
+  codes Code[]
+}
+
+model Code {
+  id            String   @id @default(uuid())
+  packId        String
+  codePlaintext String?
+  qrPayload     String
+  commitment    Bytes
+  onchainCodePda String
+  createdAt     DateTime @default(now())
+
+  pack CodePack @relation(fields: [packId], references: [id])
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  privyUserId  String?  @unique
+  createdAt    DateTime @default(now())
+
+  wallets      UserWallet[]
+  verifications Verification[]
+}
+
+model UserWallet {
+  id                       String   @id @default(uuid())
+  userId                   String
+  chain                    String   @default("solana")
+  walletPubkey             String   @unique
+  createdAt                DateTime @default(now())
+  createdAfterFirstSuccess Boolean  @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model VerifyIntent {
+  id             String            @id @default(uuid())
+  verifyIntentId String            @unique
+  batchId        String
+  commitment     Bytes
+  rewardLamports BigInt
+  status         VerifyIntentStatus @default(ISSUED)
+  expiresAt      DateTime
+  createdAt      DateTime          @default(now())
+
+  batch Batch @relation(fields: [batchId], references: [id])
+}
+
+model Verification {
+  id             String            @id @default(uuid())
+  batchId        String
+  userId         String
+  commitment     Bytes
+  codePda        String
+  rewardLamports BigInt
+  txSignature    String
+  verifiedAt     DateTime
+  result         VerificationResult
+  failureReason  String?
+
+  batch Batch @relation(fields: [batchId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+}
+
+model TreasuryOp {
+  id            String         @id @default(uuid())
+  type          TreasuryOpType
+  pyusdIn       BigInt
+  solOutLamports BigInt
+  jupiterRoute  Json
+  txSignature   String
+  createdAt     DateTime       @default(now())
+}
