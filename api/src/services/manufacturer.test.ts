@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { activateBatch, buildPackCsv, confirmPrinted } from "./manufacturer.js";
 import { confirmPrinted } from "./manufacturer.js";
 
 describe("confirmPrinted", () => {
@@ -27,5 +28,40 @@ describe("confirmPrinted", () => {
         status: "PRINT_CONFIRMED"
       })
     });
+  });
+});
+
+describe("activateBatch", () => {
+  it("rejects activation when not print-confirmed", async () => {
+    const batch = {
+      id: "batch_1",
+      codePacks: [{ printConfirmedAt: null, plaintextPurgedAt: null }]
+    };
+    const findUnique = vi.fn().mockResolvedValue(batch);
+    const update = vi.fn();
+    const prisma = {
+      batch: { findUnique, update }
+    } as unknown as PrismaClient;
+
+    await expect(activateBatch(prisma, "BATCH_1")).rejects.toThrow("PRINT_NOT_CONFIRMED");
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildPackCsv", () => {
+  it("blocks download when plaintext is purged", async () => {
+    const prisma = {
+      codePack: {
+        findUnique: vi.fn().mockResolvedValue({
+          packId: "PACK_1",
+          plaintextPurgedAt: new Date(),
+          createdAt: new Date(),
+          batch: { batchPublicId: "BATCH_1", expiryDate: null, sku: { skuCode: "SKU" } },
+          codes: []
+        })
+      }
+    } as unknown as PrismaClient;
+
+    await expect(buildPackCsv(prisma, "PACK_1")).rejects.toThrow("PLAINTEXT_PURGED");
   });
 });
