@@ -22,7 +22,7 @@ A hybrid web2 + Solana protocol:
 - Consumer: verifies code on manufacturer site; receives SOL reward.
 - Protocol backend: generates codes, computes commitments, runs relayer, runs treasury refill worker.
 - Solana program: enforces single-use verification, activation gating, and payout transfer from SOL vault.
-- Treasury worker: swaps PYUSD -> SOL in batches to refill payout float.
+- Treasury worker: swaps PYUSD -> SOL in batches to refill payout.
 
 ## Data & cryptography
 ### Code format
