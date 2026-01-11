@@ -28,12 +28,8 @@ export default function VerifyPage() {
     const codeValue = parsed?.code ?? code;
     try {
       const response = await api.verifyQuote(batch, codeValue);
+      setVerifyIntentId(response.verify_intent_id);
       setEligibility(response.status);
-      if (response.status === "ELIGIBLE") {
-        setVerifyIntentId(response.verify_intent_id);
-      } else {
-        setVerifyIntentId(null);
-      }
     } catch (err) {
       setError((err as Error).message);
     }

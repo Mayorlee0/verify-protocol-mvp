@@ -14,59 +14,6 @@ const CODE_USED: u8 = 1;
 pub mod authenticity_protocol {
     use super::*;
 
-    pub fn initialize_manufacturer(ctx: Context<InitializeManufacturer>, status: u8) -> Result<()> {
-        let manufacturer = &mut ctx.accounts.manufacturer_pda;
-        manufacturer.authority = ctx.accounts.manufacturer_authority.key();
-        manufacturer.status = status;
-        manufacturer.created_at = Clock::get()?.unix_timestamp;
-        Ok(())
-    }
-
-    pub fn initialize_batch(
-        ctx: Context<InitializeBatch>,
-        batch_public_id: Vec<u8>,
-        sku_hash: [u8; 32],
-        reward_usd_target: u64,
-        expiry_ts: i64,
-    ) -> Result<()> {
-        let batch = &mut ctx.accounts.batch_pda;
-        batch.manufacturer = ctx.accounts.manufacturer_pda.key();
-        batch.sku_hash = sku_hash;
-        batch.batch_public_id = batch_public_id;
-        batch.expiry_ts = expiry_ts;
-        batch.reward_usd_target = reward_usd_target;
-        batch.status = STATUS_CREATED;
-        batch.activated_at = 0;
-        batch.created_at = Clock::get()?.unix_timestamp;
-        Ok(())
-    }
-
-    pub fn initialize_code_state(
-        ctx: Context<InitializeCodeState>,
-        commitment: [u8; 32],
-    ) -> Result<()> {
-        let code_state = &mut ctx.accounts.code_state_pda;
-        code_state.batch = ctx.accounts.batch_pda.key();
-        code_state.commitment = commitment;
-        code_state.status = CODE_UNUSED;
-        code_state.verified_by = Pubkey::default();
-        code_state.verified_at = 0;
-        Ok(())
-    }
-
-    pub fn initialize_treasury(
-        ctx: Context<InitializeTreasury>,
-        sol_payout_vault: Pubkey,
-        min_sol_buffer_lamports: u64,
-    ) -> Result<()> {
-        let treasury = &mut ctx.accounts.treasury_pda;
-        treasury.sol_payout_vault = sol_payout_vault;
-        treasury.min_sol_buffer_lamports = min_sol_buffer_lamports;
-        treasury.created_at = Clock::get()?.unix_timestamp;
-        treasury.bump = *ctx.bumps.get("treasury_pda").ok_or(ErrorCode::InvalidAccounts)?;
-        Ok(())
-    }
-
     pub fn activate_batch(ctx: Context<ActivateBatch>) -> Result<()> {
         let manufacturer = &ctx.accounts.manufacturer_pda;
         let batch = &mut ctx.accounts.batch_pda;
@@ -136,69 +83,6 @@ pub mod authenticity_protocol {
 
         Ok(())
     }
-}
-
-#[derive(Accounts)]
-pub struct InitializeManufacturer<'info> {
-    #[account(
-        init,
-        payer = payer,
-        seeds = [b"manufacturer", manufacturer_authority.key().as_ref()],
-        bump,
-        space = 8 + 32 + 1 + 8
-    )]
-    pub manufacturer_pda: Account<'info, Manufacturer>,
-    pub manufacturer_authority: Signer<'info>,
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct InitializeBatch<'info> {
-    #[account(
-        init,
-        payer = payer,
-        seeds = [b"batch", manufacturer_pda.key().as_ref(), batch_public_id.as_slice()],
-        bump,
-        space = 8 + 32 + 32 + 4 + 64 + 8 + 8 + 1 + 8 + 8
-    )]
-    pub batch_pda: Account<'info, Batch>,
-    pub manufacturer_pda: Account<'info, Manufacturer>,
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct InitializeCodeState<'info> {
-    #[account(
-        init,
-        payer = payer,
-        seeds = [b"code", batch_pda.key().as_ref(), commitment.as_ref()],
-        bump,
-        space = 8 + 32 + 32 + 1 + 32 + 8
-    )]
-    pub code_state_pda: Account<'info, CodeState>,
-    pub batch_pda: Account<'info, Batch>,
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct InitializeTreasury<'info> {
-    #[account(
-        init,
-        payer = payer,
-        seeds = [b"treasury"],
-        bump,
-        space = 8 + 32 + 8 + 8 + 1
-    )]
-    pub treasury_pda: Account<'info, Treasury>,
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

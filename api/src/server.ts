@@ -1,46 +1,15 @@
 import Fastify from "fastify";
-import cors from "@fastify/cors";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { PrismaClient } from "@prisma/client";
-import {
-  activateBatch,
-  buildPackCsv,
-  confirmPrinted,
-  createBatchAndPack
-} from "./services/manufacturer.js";
+import { deriveCommitment, getManufacturerSecret } from "./utils/code.js";
+import { createBatchAndPack, confirmPrinted, getPackDownloadUrl } from "./services/manufacturer.js";
 import { startEmailOtp, verifyEmailOtp } from "./services/privy.js";
-import { confirmVerification, quoteVerification } from "./services/verification.js";
+import { confirmVerification } from "./services/verification.js";
 
-const server = Fastify({
-  logger: {
-    redact: {
-      paths: [
-        "req.headers.authorization",
-        "req.body.email",
-        "req.body.otp",
-        "req.body.code"
-      ],
-      remove: true
-    }
-  }
-});
-const corsOrigins = (process.env.CORS_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-server.register(cors, {
-  origin: (origin, callback) => {
-    if (!origin || corsOrigins.length === 0) {
-      callback(null, true);
-      return;
-    }
-    const allowed = corsOrigins.includes(origin);
-    callback(null, allowed);
-  },
-  credentials: true
-});
+const server = Fastify({ logger: true });
 const prisma = new PrismaClient();
-const rewardLamports = Number(process.env.DEFAULT_REWARD_LAMPORTS ?? 100000);
-const intentTtlSeconds = Number(process.env.CODE_INTENT_TTL_SECONDS ?? 120);
-const manufacturerApiKey = process.env.MANUFACTURER_API_KEY;
-const demoMode = process.env.DEMO_MODE === "true";
+const rewardLamports = Number(process.env.REWARD_LAMPORTS ?? 100000);
 
 type RateLimitEntry = {
   count: number;
@@ -79,16 +48,6 @@ const requireAuth = async (request: { headers: Record<string, string | undefined
   return payload;
 };
 
-const requireManufacturerAuth = (request: { headers: Record<string, string | undefined> }) => {
-  if (!manufacturerApiKey) {
-    throw new Error("MANUFACTURER_API_KEY_MISSING");
-  }
-  const key = request.headers["x-api-key"];
-  if (!key || key !== manufacturerApiKey) {
-    throw new Error("UNAUTHORIZED");
-  }
-};
-
 const upsertUser = async (email: string, privyUserId?: string) => {
   return prisma.user.upsert({
     where: { email },
@@ -101,9 +60,6 @@ server.post("/auth/start", async (request, reply) => {
   const body = request.body as { email?: string };
   if (!body?.email) {
     return reply.code(400).send({ status: "ERROR", reason: "EMAIL_REQUIRED" });
-  }
-  if (isRateLimited(`auth:${request.ip ?? "unknown"}`)) {
-    return reply.code(429).send({ status: "ERROR", reason: "RATE_LIMITED" });
   }
   try {
     const response = await startEmailOtp(body.email);
@@ -152,34 +108,65 @@ server.post("/verify/quote", async (request, reply) => {
     return reply.code(400).send({ status: "ERROR", reason: "INVALID_REQUEST" });
   }
   const clientKey = request.ip ?? "unknown";
-  if (isRateLimited(`quote:${clientKey}`)) {
+  if (isRateLimited(clientKey)) {
     return reply.code(429).send({ status: "NOT_ELIGIBLE", reason: "RATE_LIMITED" });
   }
 
-  try {
-    const result = await quoteVerification({
-      prisma,
-      batchPublicId: body.batch_public_id,
-      code: body.code,
-      rewardLamports,
-      intentTtlSeconds
-    });
+  const batch = await prisma.batch.findUnique({
+    where: { batchPublicId: body.batch_public_id },
+    include: { sku: true, manufacturer: true }
+  });
+  if (!batch) {
+    return reply.send({ status: "NOT_ELIGIBLE", reason: "CODE_NOT_FOUND" });
+  }
+  if (batch.status !== "ACTIVE") {
+    return reply.send({ status: "NOT_ELIGIBLE", reason: "BATCH_NOT_ACTIVE" });
+  }
 
-    return reply.send({
-      status: "ELIGIBLE",
-      verify_intent_id: result.verifyIntentId,
-      reward: {
-        usd_target: "0.10",
-        lamports: rewardLamports,
-        pricing_source: "env_config",
-        expires_at: result.expiresAt.toISOString()
-      }
+  let commitment: Buffer;
+  try {
+    const manufacturerSecret = getManufacturerSecret(batch.manufacturer.id);
+    commitment = deriveCommitment({
+      manufacturerSecret,
+      code: body.code,
+      batchPublicId: batch.batchPublicId,
+      skuHash: batch.sku.skuHash
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
-    const reason = message === "CODE_USED" ? "CODE_USED" : message;
-    return reply.send({ status: "NOT_ELIGIBLE", reason });
+    return reply.code(400).send({ status: "ERROR", reason: message });
   }
+
+  const codeRow = await prisma.code.findFirst({
+    where: { commitment }
+  });
+  if (!codeRow) {
+    return reply.send({ status: "NOT_ELIGIBLE", reason: "CODE_NOT_FOUND" });
+  }
+
+  const verifyIntentId = `vfyint_${crypto.randomBytes(6).toString("hex")}`;
+  const expiresAt = new Date(Date.now() + 2 * 60 * 1000);
+  await prisma.verifyIntent.create({
+    data: {
+      verifyIntentId,
+      batchId: batch.id,
+      commitment,
+      rewardLamports: BigInt(rewardLamports),
+      expiresAt,
+      status: "ISSUED"
+    }
+  });
+
+  return reply.send({
+    status: "ELIGIBLE",
+    verify_intent_id: verifyIntentId,
+    reward: {
+      usd_target: "0.10",
+      lamports: rewardLamports,
+      pricing_source: "env_config",
+      expires_at: expiresAt.toISOString()
+    }
+  });
 });
 
 server.post("/verify/confirm", async (request, reply) => {
@@ -204,7 +191,7 @@ server.post("/verify/confirm", async (request, reply) => {
 
     return reply.send({
       status: "VERIFIED",
-      tx_signature: result.txSignature,
+      tx_signature: "MOCK_TX",
       payout: {
         lamports: Number(result.rewardLamports),
         wallet_pubkey: result.walletPubkey ?? "SoL4nA....User"
@@ -216,17 +203,6 @@ server.post("/verify/confirm", async (request, reply) => {
     return reply.code(400).send({ status: "ERROR", reason: message });
   }
 
-});
-
-server.get("/health", async (_request, reply) => {
-  return reply.send({ status: "ok" });
-});
-
-server.get("/version", async (_request, reply) => {
-  return reply.send({
-    version: process.env.APP_VERSION ?? "dev",
-    demo_mode: demoMode
-  });
 });
 
 server.get("/me", async (_request, reply) => {
@@ -283,7 +259,9 @@ server.post("/mfg/batches", async (request, reply) => {
       batch_public_id: result.batch.batchPublicId,
       status: result.batch.status,
       pack_id: result.codePack.packId,
-      pack_status: result.codePack.status
+      pack_status: result.codePack.status,
+      download_url: result.downloadUrl,
+      expires_at: result.expiresAt.toISOString()
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
@@ -304,31 +282,9 @@ server.get("/mfg/packs/:pack_id", async (request, reply) => {
     pack_id: pack.packId,
     batch_public_id: pack.batch.batchPublicId,
     status: pack.status,
-    download_url: `/mfg/packs/${pack.packId}/download`,
+    download_url: getPackDownloadUrl(pack.packId),
     expires_at: pack.downloadExpiresAt?.toISOString() ?? null
   });
-});
-
-server.get("/mfg/packs/:pack_id/download", async (request, reply) => {
-  try {
-    requireManufacturerAuth(request);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
-    return reply.code(401).send({ status: "ERROR", reason: message });
-  }
-  const params = request.params as { pack_id: string };
-  try {
-    const csv = await buildPackCsv(prisma, params.pack_id);
-    reply.header("Content-Type", "text/csv");
-    reply.header("Content-Disposition", `attachment; filename=\"pack_${params.pack_id}.csv\"`);
-    return reply.send(csv);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
-    if (message === "PLAINTEXT_PURGED") {
-      return reply.code(410).send({ status: "ERROR", reason: message });
-    }
-    return reply.code(404).send({ status: "ERROR", reason: message });
-  }
 });
 
 server.post("/mfg/packs/:pack_id/confirm-printed", async (request, reply) => {
@@ -343,14 +299,26 @@ server.post("/mfg/packs/:pack_id/confirm-printed", async (request, reply) => {
 
 server.post("/mfg/batches/:batch_public_id/activate", async (request, reply) => {
   const params = request.params as { batch_public_id: string };
-  try {
-    const updated = await activateBatch(prisma, params.batch_public_id);
-    return reply.send({ status: updated.status, tx_signature: updated.activatedTxSignature });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
-    const status = message === "PRINT_NOT_CONFIRMED" ? 400 : 404;
-    return reply.code(status).send({ status: "ERROR", reason: message });
+  const batch = await prisma.batch.findUnique({
+    where: { batchPublicId: params.batch_public_id },
+    include: { codePacks: true }
+  });
+  if (!batch) {
+    return reply.code(404).send({ status: "NOT_FOUND" });
   }
+  const hasPrintedPack = batch.codePacks.some((pack) => pack.printConfirmedAt !== null);
+  if (!hasPrintedPack) {
+    return reply.code(400).send({ status: "ERROR", reason: "PRINT_NOT_CONFIRMED" });
+  }
+  const updated = await prisma.batch.update({
+    where: { batchPublicId: params.batch_public_id },
+    data: {
+      status: "ACTIVE",
+      activatedAt: new Date(),
+      activatedTxSignature: "tx_placeholder"
+    }
+  });
+  return reply.send({ status: updated.status, tx_signature: updated.activatedTxSignature });
 });
 
 server.post("/internal/treasury/refill", async (_request, reply) => {
