@@ -1,6 +1,4 @@
 import type { PrismaClient, VerifyIntent } from "@prisma/client";
-import crypto from "crypto";
-import { deriveCommitment, getManufacturerSecret } from "../utils/code.js";
 import { createEmbeddedWallet } from "./privy.js";
 
 type ConfirmDeps = {
@@ -8,14 +6,6 @@ type ConfirmDeps = {
   userId: string;
   verifyIntentId: string;
   now?: Date;
-};
-
-type QuoteDeps = {
-  prisma: PrismaClient;
-  batchPublicId: string;
-  code: string;
-  rewardLamports: number;
-  intentTtlSeconds: number;
 };
 
 export const buildSponsoredTx = (instruction: string) => {
@@ -53,7 +43,7 @@ export const confirmVerification = async ({ prisma, userId, verifyIntentId, now 
   await ensureIntentActive(prisma, intent, now);
 
   const existingVerification = await prisma.verification.findFirst({
-    where: { batchId: intent.batchId, commitment: intent.commitment }
+    where: { commitment: intent.commitment }
   });
   if (existingVerification) {
     throw new Error("CODE_USED");
@@ -71,107 +61,39 @@ export const confirmVerification = async ({ prisma, userId, verifyIntentId, now 
 
   buildSponsoredTx("verify_and_pay_sol");
 
-  try {
-    await prisma.$transaction([
-      prisma.verifyIntent.update({
-        where: { verifyIntentId },
-        data: { status: "CONFIRMED" }
-      }),
-      prisma.verification.create({
-        data: {
-          batchId: intent.batchId,
-          userId,
-          commitment: intent.commitment,
-          codePda: "MOCK_PDA",
-          rewardLamports: intent.rewardLamports,
-          txSignature: "MOCK_VERIFY_TX",
-          verifiedAt: now,
-          result: "SUCCESS"
-        }
-      }),
-      ...(existingWallet
-        ? []
-        : [
-            prisma.userWallet.create({
-              data: {
-                userId,
-                walletPubkey: walletPubkey,
-                chain: "solana",
-                createdAfterFirstSuccess: true
-              }
-            })
-          ])
-    ]);
-  } catch (error) {
-    const err = error as { code?: string };
-    if (err.code === "P2002") {
-      throw new Error("CODE_USED");
-    }
-    throw error;
-  }
+  await prisma.$transaction([
+    prisma.verifyIntent.update({
+      where: { verifyIntentId },
+      data: { status: "CONFIRMED" }
+    }),
+    prisma.verification.create({
+      data: {
+        batchId: intent.batchId,
+        userId,
+        commitment: intent.commitment,
+        codePda: "MOCK_PDA",
+        rewardLamports: intent.rewardLamports,
+        txSignature: "MOCK_TX",
+        verifiedAt: now,
+        result: "SUCCESS"
+      }
+    }),
+    ...(existingWallet
+      ? []
+      : [
+          prisma.userWallet.create({
+            data: {
+              userId,
+              walletPubkey: walletPubkey,
+              chain: "solana",
+              createdAfterFirstSuccess: true
+            }
+          })
+        ])
+  ]);
 
   return {
     rewardLamports: intent.rewardLamports,
     walletPubkey
-  };
-};
-
-export const quoteVerification = async ({
-  prisma,
-  batchPublicId,
-  code,
-  rewardLamports,
-  intentTtlSeconds
-}: QuoteDeps) => {
-  const batch = await prisma.batch.findUnique({
-    where: { batchPublicId },
-    include: { sku: true }
-  });
-  if (!batch) {
-    throw new Error("CODE_NOT_FOUND");
-  }
-  if (batch.status !== "ACTIVE") {
-    throw new Error("BATCH_NOT_ACTIVE");
-  }
-
-  const manufacturerSecret = getManufacturerSecret();
-  const commitment = deriveCommitment({
-    manufacturerSecret,
-    code,
-    batchPublicId: batch.batchPublicId,
-    skuHash: batch.sku.skuHash
-  });
-
-  const codeRow = await prisma.code.findFirst({
-    where: { commitment }
-  });
-  if (!codeRow) {
-    throw new Error("CODE_NOT_FOUND");
-  }
-
-  const existingVerification = await prisma.verification.findFirst({
-    where: { batchId: batch.id, commitment }
-  });
-  if (existingVerification) {
-    throw new Error("CODE_USED");
-  }
-
-  const verifyIntentId = `vfyint_${crypto.randomBytes(6).toString("hex")}`;
-  const expiresAt = new Date(Date.now() + intentTtlSeconds * 1000);
-  await prisma.verifyIntent.create({
-    data: {
-      verifyIntentId,
-      batchId: batch.id,
-      commitment,
-      rewardLamports: BigInt(rewardLamports),
-      expiresAt,
-      status: "ISSUED"
-    }
-  });
-
-  return {
-    verifyIntentId,
-    expiresAt,
-    rewardLamports
   };
 };
