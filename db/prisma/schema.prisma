@@ -163,8 +163,6 @@ model Verification {
 
   batch Batch @relation(fields: [batchId], references: [id])
   user  User  @relation(fields: [userId], references: [id])
-
-  @@unique([batchId, commitment])
 }
 
 model TreasuryOp {

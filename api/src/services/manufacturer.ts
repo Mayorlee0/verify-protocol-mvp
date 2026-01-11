@@ -1,8 +1,9 @@
 import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
 import type { PrismaClient } from "@prisma/client";
 import {
   buildQrPayload,
-  decryptPlaintext,
   deriveCommitment,
   deriveSkuHash,
   encryptPlaintext,
@@ -11,9 +12,15 @@ import {
   loadEncryptionKey
 } from "../utils/code.js";
 
+const PACK_DOWNLOAD_TTL_MS = 24 * 60 * 60 * 1000;
+
 const randomId = (prefix: string) => {
   const suffix = crypto.randomBytes(5).toString("hex").toUpperCase();
   return `${prefix}_${suffix}`;
+};
+
+const packCsvPath = (packId: string) => {
+  return path.join("/tmp", `pack_${packId}.csv`);
 };
 
 export type CreateBatchInput = {
@@ -35,7 +42,7 @@ export const createBatchAndPack = async (prisma: PrismaClient, input: CreateBatc
     throw new Error("MANUFACTURER_NOT_FOUND");
   }
 
-  const manufacturerSecret = getManufacturerSecret();
+  const manufacturerSecret = getManufacturerSecret(manufacturer.id);
   const encryptionKey = loadEncryptionKey();
 
   let sku = await prisma.sku.findFirst({
@@ -67,7 +74,7 @@ export const createBatchAndPack = async (prisma: PrismaClient, input: CreateBatc
   });
 
   const packId = randomId("PACK");
-  const generatedAt = new Date();
+  const expiresAt = new Date(Date.now() + PACK_DOWNLOAD_TTL_MS);
   const codeRows = [] as {
     packId: string;
     codePlaintext: string;
@@ -102,7 +109,8 @@ export const createBatchAndPack = async (prisma: PrismaClient, input: CreateBatc
       packId,
       batchId: batch.id,
       quantity: input.quantity,
-      status: "GENERATING"
+      status: "READY",
+      downloadExpiresAt: expiresAt
     }
   });
 
@@ -110,18 +118,34 @@ export const createBatchAndPack = async (prisma: PrismaClient, input: CreateBatc
     data: codeRows.map(({ plaintext, ...row }) => row)
   });
 
-  const readyPack = await prisma.codePack.update({
-    where: { packId },
-    data: {
-      status: "READY"
-    }
+  const generatedAt = new Date();
+  const csvHeader = "pack_id,batch_public_id,sku_code,code,qr_payload,expires_at,generated_at";
+  const csvRows = codeRows.map((row) => {
+    return [
+      codePack.packId,
+      batch.batchPublicId,
+      input.skuCode,
+      row.plaintext,
+      row.qrPayload,
+      expiresAt.toISOString(),
+      generatedAt.toISOString()
+    ].join(",");
   });
+  const csvContents = [csvHeader, ...csvRows].join("\n");
+  const csvPath = packCsvPath(codePack.packId);
+  await fs.writeFile(csvPath, csvContents, "utf8");
 
   return {
     batch,
-    codePack: readyPack,
-    generatedAt
+    codePack,
+    downloadUrl: `file://${csvPath}`,
+    expiresAt
   };
+};
+
+export const getPackDownloadUrl = (packId: string) => {
+  const csvPath = packCsvPath(packId);
+  return `file://${csvPath}`;
 };
 
 export const confirmPrinted = async (prisma: PrismaClient, packId: string) => {
@@ -140,54 +164,4 @@ export const confirmPrinted = async (prisma: PrismaClient, packId: string) => {
       }
     })
   ]);
-};
-
-export const buildPackCsv = async (prisma: PrismaClient, packId: string) => {
-  const encryptionKey = loadEncryptionKey();
-  const pack = await prisma.codePack.findUnique({
-    where: { packId },
-    include: { batch: { include: { sku: true } }, codes: true }
-  });
-  if (!pack) {
-    throw new Error("PACK_NOT_FOUND");
-  }
-
-  const csvHeader = "pack_id,batch_public_id,sku_code,code,qr_payload,generated_at,expiry_date";
-  const generatedAt = pack.createdAt.toISOString();
-  const expiryDate = pack.batch.expiryDate?.toISOString() ?? "";
-  const csvRows = pack.codes.map((code) => {
-    const plaintext = code.codePlaintext ? decryptPlaintext(code.codePlaintext, encryptionKey) : "";
-    return [
-      pack.packId,
-      pack.batch.batchPublicId,
-      pack.batch.sku.skuCode,
-      plaintext,
-      code.qrPayload,
-      generatedAt,
-      expiryDate
-    ].join(",");
-  });
-  return [csvHeader, ...csvRows].join("\n");
-};
-
-export const activateBatch = async (prisma: PrismaClient, batchPublicId: string) => {
-  const batch = await prisma.batch.findUnique({
-    where: { batchPublicId },
-    include: { codePacks: true }
-  });
-  if (!batch) {
-    throw new Error("BATCH_NOT_FOUND");
-  }
-  const ready = batch.codePacks.some((pack) => pack.printConfirmedAt || pack.plaintextPurgedAt);
-  if (!ready) {
-    throw new Error("PRINT_NOT_CONFIRMED");
-  }
-  return prisma.batch.update({
-    where: { batchPublicId },
-    data: {
-      status: "ACTIVE",
-      activatedAt: new Date(),
-      activatedTxSignature: "MOCK_TX"
-    }
-  });
 };
