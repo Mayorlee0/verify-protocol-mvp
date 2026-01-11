@@ -30,11 +30,10 @@ createdb verify_protocol_mvp
 ### 2) Configure env vars
 ```bash
 export DATABASE_URL="postgresql://localhost:5432/verify_protocol_mvp"
-export ENCRYPTION_KEY="$(openssl rand -base64 32)" # or 64-char hex
-export MANUFACTURER_SECRET="replace-with-strong-secret"
-export DEFAULT_REWARD_LAMPORTS="100000"
-export CODE_INTENT_TTL_SECONDS="120"
-export MANUFACTURER_API_KEY="replace-with-api-key"
+export ENCRYPTION_KEY="$(openssl rand -base64 32)"
+# Replace with actual manufacturer UUID (from DB). Dashes become underscores.
+export MANUFACTURER_SECRET_<MANUFACTURER_ID>="replace-with-strong-secret"
+export REWARD_LAMPORTS="100000"
 export JWT_SECRET="replace-with-strong-jwt-secret"
 export PRIVY_APP_ID="replace-with-privy-app-id"
 export PRIVY_APP_SECRET="replace-with-privy-app-secret"
