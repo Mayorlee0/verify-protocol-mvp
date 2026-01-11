@@ -1,0 +1,5 @@
+{
+  "name": "verify-protocol-mvp",
+  "private": true,
+  "packageManager": "npm@10"
+}
