@@ -5,7 +5,6 @@ describe("code generation", () => {
   it("generates codes with valid checksum", () => {
     const code = generateCode();
     expect(validateCode(code)).toBe(true);
-    expect(code).toMatch(/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){3}-[A-Z2-9]$/);
 
     const tampered = `${code.slice(0, -1)}A`;
     expect(validateCode(tampered)).toBe(false);

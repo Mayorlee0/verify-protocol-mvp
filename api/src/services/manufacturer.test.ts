@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { activateBatch, buildPackCsv, confirmPrinted } from "./manufacturer.js";
+import { confirmPrinted } from "./manufacturer.js";
 
 describe("confirmPrinted", () => {
   it("purges plaintext codes for a pack", async () => {
